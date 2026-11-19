@@ -5,28 +5,43 @@ const turnLabel = document.querySelector("#turn");
 const passButton = document.querySelector("#pass");
 const resetButton = document.querySelector("#reset");
 
-try {
-  let game = createGame();
-  const draw = createRenderer(canvas);
-  const render = () => {
-    turnLabel.textContent = `Turn ${game.turn} · ${game.player} to play`;
-    draw(game);
-  };
-
-  render();
-  passButton.disabled = false;
-  resetButton.disabled = false;
-  passButton.addEventListener("click", () => {
-    passTurn(game);
-    render();
-  });
-  resetButton.addEventListener("click", () => {
-    game = createGame();
-    render();
-  });
-  window.addEventListener("resize", render);
-} catch (error) {
+function showError(error) {
   const message = document.querySelector("#error");
   message.hidden = false;
   message.textContent = `Could not start Tactical Mind 3D. ${error.message}`;
+}
+
+try {
+  let game = createGame();
+  const draw = createRenderer(canvas);
+  const updateLabel = () => {
+    turnLabel.textContent = `Turn ${game.turn} · ${game.player} to play`;
+  };
+
+  passButton.addEventListener("click", () => {
+    passTurn(game);
+    updateLabel();
+  });
+  resetButton.addEventListener("click", () => {
+    game = createGame();
+    updateLabel();
+  });
+
+  // Animation loop: redraws every frame, so resizing is handled here too.
+  const frame = now => {
+    try {
+      draw(game, now / 1000);
+      requestAnimationFrame(frame);
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  updateLabel();
+  draw(game, performance.now() / 1000);
+  passButton.disabled = false;
+  resetButton.disabled = false;
+  requestAnimationFrame(frame);
+} catch (error) {
+  showError(error);
 }
