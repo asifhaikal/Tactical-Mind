@@ -6,11 +6,12 @@ const vertexSource = `
   uniform mat4 modelView;
   uniform mat4 projection;
   uniform vec3 tint;
+  uniform bool picking;
   varying vec3 surfaceColor;
 
   void main() {
     gl_Position = projection * modelView * vec4(position, 1.0);
-    surfaceColor = tint * shade;
+    surfaceColor = picking ? tint : tint * shade;
   }
 `;
 
@@ -101,6 +102,7 @@ function createRenderer(canvas) {
     modelView: gl.getUniformLocation(program, "modelView"),
     projection: gl.getUniformLocation(program, "projection"),
     tint: gl.getUniformLocation(program, "tint"),
+    picking: gl.getUniformLocation(program, "picking"),
   };
 
   const meshes = {
@@ -123,14 +125,16 @@ function createRenderer(canvas) {
   }
 
   // time is in seconds; it drives the crystal spin and the active team's hover.
-  return function draw(game, time) {
+  function draw(game, time, picking = false) {
     const pixelRatio = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(canvas.clientWidth * pixelRatio));
     const height = Math.max(1, Math.round(canvas.clientHeight * pixelRatio));
     if (canvas.width !== width) canvas.width = width;
     if (canvas.height !== height) canvas.height = height;
     gl.viewport(0, 0, width, height);
+    gl.clearColor(...(picking ? [0, 0, 0, 0] : [.10, .145, .19, 1]));
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.uniform1i(uniforms.picking, picking ? 1 : 0);
 
     const projection = perspective(CAMERA.fovy, width / height, CAMERA.near, CAMERA.far);
     const view = lookAt(CAMERA.eye, CAMERA.at, CAMERA.up);
@@ -141,14 +145,17 @@ function createRenderer(canvas) {
     for (let z = 0; z < BOARD_DEPTH; z += 1) {
       for (let x = 0; x < BOARD_WIDTH; x += 1) {
         const model = translate(x - centerX, 0, z - centerZ);
-        drawMesh(meshes.tile, mult(view, model), TILE_COLORS[(x + z) % 2]);
+        drawMesh(meshes.tile, mult(view, model), picking ? pickColor(x, z) : TILE_COLORS[(x + z) % 2]);
       }
     }
 
     for (const piece of game.pieces) {
       const x = piece.x - centerX;
       const z = piece.z - centerZ;
-      const color = TEAM_COLORS[piece.team];
+      const baseColor = TEAM_COLORS[piece.team];
+      const color = picking ? pickColor(piece.x, piece.z) : piece === game.selectedPawn
+        ? baseColor.map(channel => channel + (1 - channel) * .55)
+        : baseColor;
       let model;
       if (piece.kind === "crystal") {
         // Crystals bob and spin: translate · rotateY.
@@ -163,5 +170,63 @@ function createRenderer(canvas) {
         drawMesh(meshes.pawn, mult(view, model), color);
       }
     }
+  }
+
+  // ID 0 is the background; board cells use IDs 1 through 35.
+  function pickColor(x, z) {
+    return [(1 + z * BOARD_WIDTH + x) / 255, 0, 0];
+  }
+
+  const pickBuffer = gl.createFramebuffer();
+  const pickTexture = gl.createTexture();
+  const pickDepth = gl.createRenderbuffer();
+  let pickWidth = 0, pickHeight = 0;
+
+  draw.pick = (game, time, clientX, clientY) => {
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height || clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) return null;
+    // Keep the offscreen buffer exactly the same size as the visible canvas.
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(canvas.clientWidth * ratio));
+    const height = Math.max(1, Math.round(canvas.clientHeight * ratio));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pickBuffer);
+    if (width !== pickWidth || height !== pickHeight) {
+      gl.bindTexture(gl.TEXTURE_2D, pickTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, pickDepth);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickTexture, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, pickDepth);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        throw new Error("Could not create the picking framebuffer.");
+      }
+      pickWidth = width; pickHeight = height;
+    }
+    const dither = gl.isEnabled(gl.DITHER);
+    const blend = gl.isEnabled(gl.BLEND);
+    gl.disable(gl.DITHER);
+    gl.disable(gl.BLEND);
+    let id;
+    try {
+      draw(game, time, true);
+      const pixel = new Uint8Array(4);
+      const x = Math.floor((clientX - rect.left) * width / rect.width);
+      const y = height - 1 - Math.floor((clientY - rect.top) * height / rect.height);
+      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      id = pixel[0];
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      if (dither) gl.enable(gl.DITHER);
+      if (blend) gl.enable(gl.BLEND);
+      draw(game, time); // Immediately restore normal colors after the ID pass.
+    }
+    return id > 0 && id <= BOARD_WIDTH * BOARD_DEPTH
+      ? { x: (id - 1) % BOARD_WIDTH, z: Math.floor((id - 1) / BOARD_WIDTH) } : null;
   };
+  return draw;
 }
