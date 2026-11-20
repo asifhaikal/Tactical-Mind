@@ -1,16 +1,25 @@
 "use strict";
 
+// Basic lighting: one directional light plus ambient (Lambert diffuse).
+// The normal is moved to eye space with the normal matrix, so the light
+// direction is given in eye space too. Faces are flat, so per-vertex
+// lighting already gives one shade per face; specular comes later.
 const vertexSource = `
   attribute vec3 position;
-  attribute vec3 shade;
+  attribute vec3 normal;
   uniform mat4 modelView;
   uniform mat4 projection;
+  uniform mat3 normalMatrix;
   uniform vec3 tint;
+  uniform vec3 lightDirection;
+  uniform float ambient;
   varying vec3 surfaceColor;
 
   void main() {
     gl_Position = projection * modelView * vec4(position, 1.0);
-    surfaceColor = tint * shade;
+    vec3 n = normalize(normalMatrix * normal);
+    float diffuse = max(dot(n, lightDirection), 0.0);
+    surfaceColor = tint * (ambient + (1.0 - ambient) * diffuse);
   }
 `;
 
@@ -25,8 +34,30 @@ const fragmentSource = `
 const TEAM_COLORS = { Red: [.96, .33, .30], Blue: [.27, .64, 1], Neutral: [1, .77, .29] };
 const TILE_COLORS = [[.43, .54, .62], [.29, .38, .45]];
 
-// Fixed camera above the board's front-right corner, looking at its center.
-const CAMERA = { eye: [1.9, 5.6, 6.5], at: [0, 0, 0], up: [0, 1, 0], fovy: 48, near: 1, far: 30 };
+// Orbit camera. main.js changes azimuth / elevation (mouse drag) and radius
+// (scroll wheel); CAMERA.eye is recomputed from them every frame. The start
+// values put the eye where the old fixed camera was, above the front-right corner.
+const CAMERA = {
+  azimuth: 16, elevation: 40, radius: 8.8,
+  minElevation: 15, maxElevation: 85, minRadius: 5, maxRadius: 16,
+  eye: [0, 0, 0], at: [0, 0, 0], up: [0, 1, 0], fovy: 48, near: 1, far: 30,
+};
+
+// Spherical (azimuth, elevation, radius) around CAMERA.at -> eye position.
+function updateCameraEye() {
+  const az = CAMERA.azimuth * Math.PI / 180;
+  const el = CAMERA.elevation * Math.PI / 180;
+  const flat = CAMERA.radius * Math.cos(el);
+  CAMERA.eye = [
+    CAMERA.at[0] + flat * Math.sin(az),
+    CAMERA.at[1] + CAMERA.radius * Math.sin(el),
+    CAMERA.at[2] + flat * Math.cos(az),
+  ];
+}
+
+// World-space direction toward the light. It is fixed to the world, so the
+// lit sides of the pieces stay the same while the camera orbits.
+const LIGHT = { direction: normalize([.35, 1, .55]), ambient: .35 };
 
 function createShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -38,15 +69,19 @@ function createShader(gl, type, source) {
   return shader;
 }
 
-// Each vertex is a position plus a grey shade; the per-object tint uniform colors it.
-function appendTriangles(vertices, points, faces, x, y, z) {
-  faces.forEach((face, index) => {
-    const shade = index < 2 ? 1 : 0.68 + 0.06 * (Math.floor(index / 2) % 4);
-    for (const vertex of face) {
-      const [px, py, pz] = points[vertex];
-      vertices.push(x + px, y + py, z + pz, shade, shade, shade);
+// Each vertex is a position plus the face normal (flat shading). The normal is
+// the cross product of two edges, flipped if needed so it points away from the
+// mesh's center; that way the face winding in the tables below does not matter.
+function appendTriangles(vertices, points, faces, x, y, z, center) {
+  for (const face of faces) {
+    const [a, b, c] = face.map(vertex => points[vertex]);
+    let n = normalize(cross(subtract(b, a), subtract(c, a)));
+    const middle = [0, 1, 2].map(i => (a[i] + b[i] + c[i]) / 3);
+    if (dot(n, subtract(middle, center)) < 0) n = [-n[0], -n[1], -n[2]];
+    for (const [px, py, pz] of [a, b, c]) {
+      vertices.push(x + px, y + py, z + pz, n[0], n[1], n[2]);
     }
-  });
+  }
 }
 
 function appendBox(vertices, y, halfWidth, height) {
@@ -59,7 +94,7 @@ function appendBox(vertices, y, halfWidth, height) {
     [0, 1, 2], [0, 2, 3], [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2],
     [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0], [4, 7, 6], [4, 6, 5],
   ];
-  appendTriangles(vertices, points, faces, 0, y, 0);
+  appendTriangles(vertices, points, faces, 0, y, 0, [0, height / 2, 0]);
 }
 
 function appendCrystal(vertices) {
@@ -67,7 +102,7 @@ function appendCrystal(vertices) {
     [-.29, .36, 0], [0, .36, -.29], [0, 0, 0]];
   const faces = [[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 1],
     [5, 2, 1], [5, 3, 2], [5, 4, 3], [5, 1, 4]];
-  appendTriangles(vertices, points, faces, 0, 0, 0);
+  appendTriangles(vertices, points, faces, 0, 0, 0, [0, .36, 0]);
 }
 
 // Meshes are built once in their own local (model) coordinates, centered on the origin.
@@ -92,7 +127,7 @@ function createRenderer(canvas) {
   }
   gl.useProgram(program);
 
-  const attributes = [["position", 0], ["shade", 12]].map(([name, offset]) => {
+  const attributes = [["position", 0], ["normal", 12]].map(([name, offset]) => {
     const location = gl.getAttribLocation(program, name);
     gl.enableVertexAttribArray(location);
     return { location, offset };
@@ -100,7 +135,10 @@ function createRenderer(canvas) {
   const uniforms = {
     modelView: gl.getUniformLocation(program, "modelView"),
     projection: gl.getUniformLocation(program, "projection"),
+    normalMatrix: gl.getUniformLocation(program, "normalMatrix"),
     tint: gl.getUniformLocation(program, "tint"),
+    lightDirection: gl.getUniformLocation(program, "lightDirection"),
+    ambient: gl.getUniformLocation(program, "ambient"),
   };
 
   const meshes = {
@@ -118,6 +156,8 @@ function createRenderer(canvas) {
       gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 24, offset);
     }
     gl.uniformMatrix4fv(uniforms.modelView, false, modelView);
+    // Inverse transpose keeps normals correct under the pawns' non-uniform scale.
+    gl.uniformMatrix3fv(uniforms.normalMatrix, false, normalMatrix(modelView));
     gl.uniform3fv(uniforms.tint, color);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
   }
@@ -133,8 +173,12 @@ function createRenderer(canvas) {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
     const projection = perspective(CAMERA.fovy, width / height, CAMERA.near, CAMERA.far);
+    updateCameraEye();
     const view = lookAt(CAMERA.eye, CAMERA.at, CAMERA.up);
     gl.uniformMatrix4fv(uniforms.projection, false, projection);
+    // The light is set in world space, so move it into eye space with the view.
+    gl.uniform3fv(uniforms.lightDirection, normalize(transformDirection(view, LIGHT.direction)));
+    gl.uniform1f(uniforms.ambient, LIGHT.ambient);
 
     const centerX = (BOARD_WIDTH - 1) / 2;
     const centerZ = (BOARD_DEPTH - 1) / 2;

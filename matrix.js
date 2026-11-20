@@ -75,6 +75,34 @@ function lookAt(eye, at, up) {
   return m;
 }
 
+// Applies the upper 3 × 3 of m to a direction (w = 0, so no translation).
+function transformDirection(m, v) {
+  return [
+    m[0] * v[0] + m[4] * v[1] + m[8] * v[2],
+    m[1] * v[0] + m[5] * v[1] + m[9] * v[2],
+    m[2] * v[0] + m[6] * v[1] + m[10] * v[2],
+  ];
+}
+
+// Normal matrix: the inverse transpose of the upper 3 × 3 of the model-view,
+// as a column-major Float32Array(9) for gl.uniformMatrix3fv. For rotations it
+// equals the matrix itself; it differs when an object is scaled unevenly.
+function normalMatrix(m) {
+  const a00 = m[0], a10 = m[1], a20 = m[2];
+  const a01 = m[4], a11 = m[5], a21 = m[6];
+  const a02 = m[8], a12 = m[9], a22 = m[10];
+  // Cofactors of the 3 × 3; (A⁻¹)ᵀ = cofactor matrix / det.
+  const c00 = a11 * a22 - a12 * a21, c01 = a12 * a20 - a10 * a22, c02 = a10 * a21 - a11 * a20;
+  const c10 = a02 * a21 - a01 * a22, c11 = a00 * a22 - a02 * a20, c12 = a01 * a20 - a00 * a21;
+  const c20 = a01 * a12 - a02 * a11, c21 = a02 * a10 - a00 * a12, c22 = a00 * a11 - a01 * a10;
+  const det = a00 * c00 + a01 * c01 + a02 * c02;
+  return new Float32Array([
+    c00 / det, c10 / det, c20 / det,
+    c01 / det, c11 / det, c21 / det,
+    c02 / det, c12 / det, c22 / det,
+  ]);
+}
+
 // fovy in degrees; near and far are positive distances.
 function perspective(fovy, aspect, near, far) {
   const f = 1 / Math.tan(fovy * Math.PI / 360);

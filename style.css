@@ -25,4 +25,7 @@ canvas {
   width: 100%;
   aspect-ratio: 3 / 2;
   background: #192530;
+  cursor: grab;
+  touch-action: none; /* dragging on a touch screen orbits instead of scrolling */
 }
+canvas:active { cursor: grabbing; }
