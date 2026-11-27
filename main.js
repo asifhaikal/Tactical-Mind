@@ -15,8 +15,26 @@ try {
   let game = createGame();
   const draw = createRenderer(canvas);
   const updateLabel = () => {
-    turnLabel.textContent = `Turn ${game.turn} · ${game.player} to play`;
+    turnLabel.textContent = `Turn ${game.turn} · ${game.player} to play${game.selectedPawn ? " · Pawn selected: click an empty nearby tile" : " · Click one of your pawns"}`;
   };
+
+  // A picking pass returns the board cell under the mouse, including pawn surfaces.
+  canvas.addEventListener("click", event => {
+    const cell = draw.pick(game, performance.now() / 1000, event.clientX, event.clientY);
+    if (!cell) {
+      game.selectedPawn = null;
+    } else {
+      const piece = pieceAt(game, cell.x, cell.z);
+      if (piece && piece.kind === "pawn" && piece.team === game.player) {
+        selectPawn(game, cell.x, cell.z);
+      } else if (!movePawn(game, cell.x, cell.z)) {
+        // Invalid targets do not consume a turn or discard the selected pawn.
+        turnLabel.textContent = `Turn ${game.turn} · ${game.player}: choose an empty adjacent tile`;
+        return;
+      }
+    }
+    updateLabel();
+  });
 
   passButton.addEventListener("click", () => {
     passTurn(game);
